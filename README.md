@@ -228,3 +228,251 @@ sumo-gui -c sumo/cross.sumo.cfg --remote-port 9999 --start
 ### 你已完成最困難的「環境能跑」階段。
 
 後續只需專注於 **應用層安全邏輯與效能評估**；任何新的編譯錯誤、TraCI 連線問題或 SUMO 路網疑難，對照本指南或將訊息全貼出，即可迅速定位。祝專案順利!
+
+
+# End‑to‑End Guide: Ubuntu 24.04 + SUMO 1.20.0 + OMNeT++ 6.0.3 + Veins (RSUExampleScenario)
+
+> **Goal**  Run the Veins `RSUExampleScenario` headlessly via **TraCI** on a fresh Ubuntu 24.04 LTS VM.
+> When you finish this guide, `./run -u Cmdenv -c Default` will reach *t = 200 s* without errors.
+
+---
+
+## 0 .  Tested Software & Versions
+
+| Component | Version                                  | Notes                                          |
+| --------- | ---------------------------------------- | ---------------------------------------------- |
+| OS        | Ubuntu 24.04.2 LTS                       | Kernel 6.11                                    |
+| GCC/G++   | 13.3.0                                   | from distro                                    |
+| CMake     | 3.28.3                                   | from distro                                    |
+| Python    | 3.12.3                                   | system default                                 |
+| SUMO      | 1.20.0                                   | built from source, **GUI compiled but unused** |
+| OMNeT++   | 6.0.3                                    | Academic, built from source                    |
+| Veins     | shipped in *omnetpp‑6.0.3/samples/veins* |                                                |
+
+---
+
+## 1 .  System Dependencies
+
+```bash
+sudo apt update && sudo apt install -y \
+    build-essential g++ gcc make cmake git pkg-config \
+    libproj-dev libgdal-dev libxerces-c-dev libgl2ps-dev \
+    libfox-1.6-dev    # optional; avoids GUI‑build errors
+```
+
+> *`libfox-1.6-dev`* is optional but removes headaches—`cmake` tends to compile the GUI anyway.
+
+---
+
+## 2 .  Build & Set up SUMO 1.20.0
+
+```bash
+# fetch & build
+cd ~ && git clone --branch v1_20_0 https://github.com/eclipse/sumo.git
+mkdir sumo/build && cd sumo/build
+cmake .. -DCMAKE_BUILD_TYPE=Release   # ENABLE_GUI flags are ignored, accept default
+make -j$(nproc)
+
+# env vars (append to ~/.bashrc)
+echo 'export SUMO_HOME="$HOME/sumo"'           >> ~/.bashrc
+echo 'export PATH="$HOME/sumo/bin:$PATH"'      >> ~/.bashrc
+echo 'export PYTHONPATH="$SUMO_HOME/tools:$PYTHONPATH"' >> ~/.bashrc
+source ~/.bashrc
+```
+
+**Verify**
+
+```bash
+sumo --version           # should show 1.20.0
+python3 -c "import traci, sumolib; print('Traci OK, Sumolib OK')"
+```
+
+---
+
+## 3 .  Build OMNeT++ 6.0.3  (Qt optional)
+
+```bash
+cd ~
+wget https://github.com/omnetpp/omnetpp/releases/download/opp_6.0.3/omnetpp-6.0.3-src.tgz
+tar xzf omnetpp-6.0.3-src.tgz && cd omnetpp-6.0.3
+./configure   # add --disable-qtenv if you want pure CLI
+make -j$(nproc)
+source setenv          # every shell that runs OMNeT++ needs this
+```
+
+---
+
+## 4 .  Prepare the Veins sample
+
+```bash
+cd ~/omnetpp-6.0.3/samples/veins/examples/veins
+
+# 4.1 generate a route file (if missing)
+python3 $SUMO_HOME/tools/randomTrips.py \
+        -n sumo/cross.net.xml \
+        -r sumo/cross.rou.xml -e 200
+
+# 4.2 place the three key SUMO files **beside launch.xml**
+cp sumo/cross.net.xml  .
+cp sumo/cross.rou.xml  .
+cp sumo/cross.sumo.cfg .
+```
+
+> **Why?** `veins_launchd` only copies files that live in the **same directory** as `launch.xml`; filenames must not contain `/`.
+
+---
+
+## 5 .  Create `launch.xml`
+
+```xml
+<?xml version="1.0"?>
+<launch>
+    <launcherd host="localhost" port="${port}" numRetries="5" seed="${seed}"/>
+
+    <!-- files to copy into the temp dir -->
+    <copy file="cross.net.xml"/>
+    <copy file="cross.rou.xml"/>
+    <copy file="cross.sumo.cfg" type="config"/>
+
+    <!-- SUMO command (no path prefixes!) -->
+    <sumo cmd="sumo -c cross.sumo.cfg \
+                    --remote-port ${port} \
+                    --seed ${seed} \
+                    --step-length 0.1 \
+                    --time-to-teleport -1 \
+                    --quit-on-end=true"/>
+</launch>
+```
+
+Key rules
+
+* `<copy>` lines **must not contain `/`**
+* Exactly **one** `<copy>` has `type="config"`.
+
+---
+
+## 6 .  Edit `omnetpp.ini`
+
+```ini
+[Config Default]
+*.manager.launchConfig = xmldoc("launch.xml")
+*.manager.port         = 9999      # must match daemon
+*.manager.seed         = 0
+*.manager.debug        = true
+*.manager.autoShutdown = true
+*.manager.configFile   = "sumo/cross.sumo.cfg"  # still useful for timing
+network = RSUExampleScenario
+```
+
+> Leave `debug-on-errors=true` during first run; set it to `false` later for batch runs.
+
+---
+
+## 7 .  Run the Simulation
+
+### 7.1 start the launch daemon
+
+```bash
+cd ~/omnetpp-6.0.3/samples/veins
+bin/veins_launchd -vv -c $SUMO_HOME/bin/sumo -p 9999
+```
+
+Expected log extract:
+
+```
+Copying cross.net.xml
+Copying cross.rou.xml
+Copying cross.sumo.cfg
+Starting SUMO …
+Proxying TraCI on port 9999
+```
+
+### 7.2 run OMNeT++
+
+```bash
+cd ~/omnetpp-6.0.3
+source setenv
+cd samples/veins/examples/veins
+./run -u Cmdenv -c Default
+```
+
+成功輸出：
+
+```
+INFO: Connected to TraCI server on localhost:9999
+…
+<!> Simulation time limit reached -- at t=200s
+```
+
+---
+
+## 8 .  Frequent Pitfalls & Fixes
+
+| Symptom                                                                                | Cause                                         | Fix                                                                                 |
+| -------------------------------------------------------------------------------------- | --------------------------------------------- | ----------------------------------------------------------------------------------- |
+| `CMake Warning: Manually-specified variables were not used by the project: ENABLE_GUI` | SUMO CMake ignores these variables            | Accept default build (GUI compiled) or pass `-D FOX_CONFIG=` to *skip* Fox entirely |
+| `Aborting on error: name of file to copy "sumo/…" contains a "/"`                      | `<copy>` path contains `/`                    | Move file to same folder and reference by bare filename                             |
+| `Aborting on error: launch config contained no <copy> node with type="config"`         | Missing `type="config"` on one `<copy>`       | Add it to the `.cfg` line                                                           |
+| `Connection refused` at t = 0                                                          | `veins_launchd` aborted before proxying TraCI | Check daemon window; fix the abort reason above                                     |
+
+---
+
+## 9 .  Alternative: skip launchd (Forker)
+
+If you prefer to avoid a second terminal:
+
+```ini
+*.manager.moduleType = "veins::TraCIScenarioManagerForker"
+*.manager.command    = "sumo"
+*.manager.configFile = "sumo/cross.sumo.cfg"
+*.manager.port       = 0        # auto‐assign
+```
+
+`Forker` launches SUMO via `fork()` internally, but you lose the nice temp‑dir isolation for batch runs.
+
+---
+
+## 10 .  Batch runs & tips
+
+* Disable interactive traps:
+
+  * `debug-on-errors = false`
+  * `cmdenv-interactive = false`
+* Collect results in `results/` – configure in `omnetpp.ini`.
+* Use different seeds by overriding `--seed <n>` when calling `./run`.
+
+---
+
+## 11 .  Quick checklist (copy‑paste for fresh VM)
+
+```bash
+# 0. prerequisites (Ubuntu 24.04)
+sudo apt update && sudo apt install build-essential cmake git libfox-1.6-dev libproj-dev libgdal-dev libxerces-c-dev libgl2ps-dev python3 python3-dev python3-pip -y
+
+# 1. build SUMO 1.20.0
+cd ~ && git clone --branch v1_20_0 https://github.com/eclipse/sumo.git && \
+mkdir sumo/build && cd sumo/build && cmake .. -DCMAKE_BUILD_TYPE=Release && make -j$(nproc)
+
+# 2. env vars
+echo 'export SUMO_HOME="$HOME/sumo"'           >> ~/.bashrc
+echo 'export PATH="$HOME/sumo/bin:$PATH"'      >> ~/.bashrc
+echo 'export PYTHONPATH="$SUMO_HOME/tools:$PYTHONPATH"' >> ~/.bashrc
+source ~/.bashrc
+
+# 3. build OMNeT++ 6.0.3
+cd ~ && wget https://github.com/omnetpp/omnetpp/releases/download/opp_6.0.3/omnetpp-6.0.3-src.tgz && \
+tar xzf omnetpp-6.0.3-src.tgz && cd omnetpp-6.0.3 && ./configure && make -j$(nproc)
+
+# 4. prep sample
+source setenv
+cd samples/veins/examples/veins && \
+python3 $SUMO_HOME/tools/randomTrips.py -n sumo/cross.net.xml -r sumo/cross.rou.xml -e 200 && \
+cp sumo/cross.* .
+
+# 5. ensure launch.xml & omnetpp.ini match this README, then:
+cd ~/omnetpp-6.0.3/samples/veins && bin/veins_launchd -vv -c $SUMO_HOME/bin/sumo -p 9999 &
+cd ~/omnetpp-6.0.3 && source setenv && cd samples/veins/examples/veins && ./run -u Cmdenv -c Default
+```
+
+Enjoy reproducible Veins + SUMO simulations! 🚗📡
+
